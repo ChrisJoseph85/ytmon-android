@@ -32,11 +32,14 @@ object Wire {
                 ?: JsonArray(emptyList()))
             else -> JsonArray(emptyList())
         }
-        return array.mapNotNull { element ->
-            if (element is JsonObject) runCatching {
-                Network.json.decodeFromJsonElement(Channel.serializer(), element)
-            }.getOrNull() else null
-        }
+        return channelArray(array)
+    }
+
+    /** Per-element: one unreadable row costs that row, not the whole list. */
+    private fun channelArray(array: JsonArray): List<Channel> = array.mapNotNull { element ->
+        if (element is JsonObject) runCatching {
+            Network.json.decodeFromJsonElement(Channel.serializer(), element)
+        }.getOrNull() else null
     }
 
     /**
@@ -60,9 +63,16 @@ object Wire {
     }.getOrElse { ScanOutcome() }
 
     fun snapshot(raw: String): SubscriptionSnapshot = runCatching {
-        Network.json.decodeFromJsonElement(
-            SubscriptionSnapshot.serializer(),
-            Network.json.parseToJsonElement(raw).jsonObject,
+        val obj = Network.json.parseToJsonElement(raw).jsonObject
+        SubscriptionSnapshot(
+            source = obj.first("source")?.contentOrNull,
+            imported = obj.first("imported")?.intOrNull ?: 0,
+            updated = obj.first("updated")?.intOrNull ?: 0,
+            skipped = obj.first("skipped")?.intOrNull ?: 0,
+            total = obj.first("total")?.intOrNull ?: 0,
+            createdAt = obj.first("created_at", "createdAt")?.contentOrNull,
+            // Per-element, like channels(): one bad stored row must not empty the snapshot.
+            channels = obj.firstArray("channels", "items", "subscriptions")?.let(::channelArray).orEmpty(),
         )
     }.getOrElse { SubscriptionSnapshot() }
 
@@ -72,7 +82,8 @@ object Wire {
      * Returns null when the payload looks like a subscriptions export.
      */
     fun takeoutProblem(text: String): String? {
-        val trimmed = text.trim()
+        // Editors happily leave a BOM on a saved file, and it breaks JSON parsing.
+        val trimmed = text.trim().removePrefix("﻿")
         if (trimmed.isEmpty()) return "Paste the contents of subscriptions.json first."
         val root = runCatching { Network.json.parseToJsonElement(trimmed) }.getOrNull()
             ?: return "That is not valid JSON."

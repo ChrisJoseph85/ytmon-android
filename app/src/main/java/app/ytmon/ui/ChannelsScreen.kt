@@ -9,6 +9,7 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
@@ -20,11 +21,13 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Button
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedButton
@@ -58,6 +61,7 @@ import app.ytmon.data.SubscriptionImportResult
 import app.ytmon.data.SubscriptionsStatus
 import app.ytmon.data.Wire
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
@@ -109,11 +113,19 @@ fun ChannelsScreen() {
             } else {
                 item {
                     Text(
-                        "${s.channels.size} channel${if (s.channels.size == 1) "" else "s"} · " +
-                            "${s.automatic} auto, ${s.manual} manual",
+                        buildString {
+                            append("${s.channels.size} channel${if (s.channels.size == 1) "" else "s"}")
+                            // The split only describes the whole list, so it is only true
+                            // when nothing is filtered out.
+                            if (s.filter == ChannelFilter.ALL) append(" · ${s.automatic} auto, ${s.manual} manual")
+                        },
                         style = MaterialTheme.typography.titleSmall,
                     )
                     LastImportLine(s.subscriptionsStatus, Modifier.padding(top = 2.dp))
+                }
+
+                if (s.loading) {
+                    item { LinearProgressIndicator(Modifier.fillMaxWidth()) }
                 }
 
                 item {
@@ -171,7 +183,7 @@ fun ChannelsScreen() {
 
                 item {
                     OutlinedButton(
-                        onClick = { importing = false; vm.clearImportResult(); vm.loadStatus(); subscriptionImport = true },
+                        onClick = { importing = false; vm.loadStatus(); subscriptionImport = true },
                         modifier = Modifier.padding(top = 12.dp),
                     ) { Text("Import YouTube subscriptions…") }
                 }
@@ -200,7 +212,9 @@ fun ChannelsScreen() {
                     selected = channel.channelId in s.selection,
                     multiSelect = s.multiSelect,
                     scanning = channel.channelId in s.scanning,
-                    onClick = { vm.toggleSelection(channel.channelId) },
+                    // A plain tap must NOT select: a stray tap would otherwise sit in the
+                    // selection and be picked up by the next long-press's bulk action.
+                    onClick = { if (s.multiSelect) vm.toggleSelection(channel.channelId) },
                     onLongClick = { vm.setMultiSelect(true); vm.toggleSelection(channel.channelId) },
                     onToggle = { vm.toggleEnabled(channel) },
                     onMode = { vm.setMode(channel, it) },
@@ -259,7 +273,9 @@ private fun LastImportLine(status: SubscriptionsStatus?, modifier: Modifier = Mo
     val at = status?.lastImportAt
     if (at == null) return
     Text(
-        "Last imported ${prettyStamp(at)} from ${status.lastImportSource ?: "takeout"} — " +
+        // No source reported means no source claimed — guessing "takeout" would lie
+        // about a feed import.
+        "Last imported ${prettyStamp(at)}${status.lastImportSource?.takeIf { it.isNotBlank() }?.let { " from $it" } ?: ""} — " +
             "the server keeps a copy, so this list stays even if the YouTube cookies expire.",
         style = MaterialTheme.typography.labelSmall,
         color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -283,8 +299,18 @@ private fun ChannelCard(
     onDelete: () -> Unit,
     onOverride: (QualityOverride?) -> Unit,
 ) {
-    var override by remember(channel.channelId) { mutableStateOf(channel.qualityOverride) }
+    // Keyed on the server value too, so a failed PATCH (or any change made elsewhere)
+    // re-syncs the card instead of leaving an unsaved value showing as saved.
+    var override by remember(channel.channelId, channel.qualityOverride) {
+        mutableStateOf(channel.qualityOverride)
+    }
     var editing by remember(channel.channelId) { mutableStateOf(false) }
+
+    // Persist a genuine user change only. On mount `override` equals the server value,
+    // so this stays quiet until the picker actually changes something.
+    LaunchedEffect(override) {
+        if (override != channel.qualityOverride) onOverride(override)
+    }
 
     Surface(
         Modifier.fillMaxWidth().padding(top = 12.dp),
@@ -439,7 +465,10 @@ private fun ScheduleEditor(
 
         if (canSchedule && on) {
             Row(
-                Modifier.padding(top = 10.dp),
+                Modifier
+                    .padding(top = 10.dp)
+                    // Seven chips do not fit a narrow card, so they scroll rather than clip.
+                    .horizontalScroll(rememberScrollState()),
                 horizontalArrangement = Arrangement.spacedBy(6.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
@@ -488,7 +517,10 @@ private fun ScheduleEditor(
             Modifier.fillMaxWidth().padding(top = 10.dp),
             horizontalArrangement = Arrangement.End,
         ) {
-            TextButton(onClick = { onSave(false, picked, at, true) }) { Text("Clear schedule") }
+            // Turning the schedule off leaves it configured, so an empty day list
+            // (every day) and a null time are sent as well — a switch left behind is
+            // what comes back when it is switched on again.
+            TextButton(onClick = { onSave(false, emptyList(), null, true) }) { Text("Clear schedule") }
             Button(onClick = { onSave(on, picked, at, cleared) }, enabled = canSchedule) {
                 Text("Save")
             }
@@ -503,7 +535,7 @@ private fun BulkScheduleSheet(
     onDismiss: () -> Unit,
     onApply: (Boolean, List<String>, String?) -> Unit,
 ) {
-    val sheetState = rememberModalBottomSheetState()
+    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     var on by remember { mutableStateOf(true) }
     var picked by remember { mutableStateOf(emptyList<String>()) }
     var at by remember { mutableStateOf<String?>(null) }
@@ -525,7 +557,9 @@ private fun BulkScheduleSheet(
 
             if (on) {
                 Row(
-                    Modifier.padding(top = 10.dp),
+                    Modifier
+                        .padding(top = 10.dp)
+                        .horizontalScroll(rememberScrollState()),
                     horizontalArrangement = Arrangement.spacedBy(6.dp),
                 ) {
                     DAY_CHIPS.forEach { (day, label) ->
@@ -559,15 +593,15 @@ private fun BulkScheduleSheet(
 
 /**
  * Subscription import. Takeout is the DEFAULT and the recommended path because it
- * needs nothing configured on the server; the feed option is offered only when the
- * server actually has cookies, so the user never meets a raw 400 import_failed.
+ * needs nothing configured on the server; the feed option is only enabled when the
+ * server reports cookies, so the user never meets a raw 400 import_failed.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun ImportSheet(onDismiss: () -> Unit) {
     val vm: ChannelsViewModel = ytViewModel { ChannelsViewModel(it.repo) }
     val s by vm.state.collectAsStateWithLifecycle()
-    val sheetState = rememberModalBottomSheetState()
+    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     var body by remember { mutableStateOf("") }
@@ -588,7 +622,31 @@ private fun ImportSheet(onDismiss: () -> Unit) {
     }
 
     val takeout = s.importSource != "feed"
-    val problem = if (takeout && body.isNotBlank()) Wire.takeoutProblem(body) else null
+
+    /**
+     * Validating a Takeout paste means parsing the whole file — hundreds of KB to a
+     * few MB. Doing that inline would run it on every keystroke AND on every
+     * recomposition (the Import button asks too), so it is debounced and moved off
+     * the main thread; the button stays disabled until [checked] matches what is typed.
+     */
+    var takeoutProblem by remember { mutableStateOf<String?>(null) }
+    var checked by remember { mutableStateOf<String?>(null) }
+    LaunchedEffect(body, takeout) {
+        if (!takeout || body.isBlank()) {
+            takeoutProblem = null
+            checked = null
+            return@LaunchedEffect
+        }
+        val text = body
+        delay(350)
+        val problem = withContext(Dispatchers.Default) { Wire.takeoutProblem(text) }
+        // The effect is cancelled when body changes, but a parse already past its last
+        // suspension point can still land — never report a verdict about old text.
+        if (body == text) {
+            takeoutProblem = problem
+            checked = text
+        }
+    }
 
     ModalBottomSheet(onDismissRequest = onDismiss, sheetState = sheetState) {
         Column(
@@ -629,13 +687,17 @@ private fun ImportSheet(onDismiss: () -> Unit) {
                     onValueChange = { body = it; readError = null },
                     label = { Text("Paste subscriptions.json") },
                     minLines = 4,
-                    isError = problem != null || readError != null,
+                    isError = takeoutProblem != null || readError != null,
                     modifier = Modifier.fillMaxWidth().padding(top = 10.dp),
                 )
                 Row(Modifier.padding(top = 6.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     TextButton(onClick = {
                         val clip = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-                        val text = clip.primaryClip?.getItemAt(0)?.coerceToText(context)?.toString()
+                        val text = clip.primaryClip
+                            ?.takeIf { it.itemCount > 0 }
+                            ?.getItemAt(0)
+                            ?.coerceToText(context)
+                            ?.toString()
                         if (text.isNullOrBlank()) readError = "The clipboard is empty."
                         else { body = text; readError = null }
                     }) { Text("Paste") }
@@ -646,7 +708,9 @@ private fun ImportSheet(onDismiss: () -> Unit) {
                         TextButton(onClick = { body = ""; readError = null }) { Text("Clear") }
                     }
                 }
-                val note = readError ?: problem
+                // Only trust the verdict while it is about the text on screen — during the debounce
+                // window it can still describe the previous paste.
+                val note = readError ?: takeoutProblem.takeIf { checked == body }
                 if (note != null) {
                     Text(note, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.error)
                 }
@@ -658,10 +722,12 @@ private fun ImportSheet(onDismiss: () -> Unit) {
                 TextButton(onClick = onDismiss) { Text("Close") }
                 Button(
                     onClick = { vm.importSubscriptions(s.importSource, if (takeout) body else null) },
-                    // Without cookies the feed import is a guaranteed 400 import_failed, so
-                    // it stays disabled until the server reports YTMON_COOKIES_FILE is set.
                     enabled = !s.importing && when {
-                        takeout -> Wire.takeoutProblem(body) == null
+                        // Takeout: only after the current text has been validated clean.
+                        takeout -> body.isNotBlank() && checked == body && takeoutProblem == null
+                        // Feed: a missing cookie file is a guaranteed 400 import_failed.
+                        // Left enabled when the status is unknown (older server), because
+                        // the error hint then explains it better than a dead button.
                         else -> s.subscriptionsStatus?.cookiesConfigured != false
                     },
                 ) {
@@ -712,6 +778,13 @@ private fun ImportResultCard(result: SubscriptionImportResult, modifier: Modifie
                 )
                 result.errorMessages.take(10).forEach {
                     Text("• $it", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.error)
+                }
+                if (result.errors.size > 10) {
+                    Text(
+                        "…and ${result.errors.size - 10} more",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.error,
+                    )
                 }
             }
         }

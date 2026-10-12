@@ -63,9 +63,17 @@ companion object {
                         "It may be asleep — try again shortly."
                 is java.net.UnknownHostException ->
                     "Could not resolve the server host."
+                /**
+                 * The server DID answer — the reply just did not fit the model (a field
+                 * changed type, say). Reporting this as a transport failure would tell
+                 * the user their server is asleep, which is both wrong and unactionable.
+                 */
+                is kotlinx.serialization.SerializationException ->
+                    "The server answered, but with something this version of the app could not read. " +
+                        "It may need updating."
                 else -> t.message ?: "Network error"
             }
-            return ApiException(0, "unreachable", msg)
+            return ApiException(0, if (t is kotlinx.serialization.SerializationException) "bad_response" else "unreachable", msg)
         }
     }
 }

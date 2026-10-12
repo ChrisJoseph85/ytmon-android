@@ -52,6 +52,9 @@ class ChannelsViewModel(private val repo: YtRepository) : ViewModel() {
     private val _state = MutableStateFlow(ChannelsState())
     val state: StateFlow<ChannelsState> = _state.asStateFlow()
 
+    /** Bumped by every [refresh]; stale responses are dropped. */
+    private var refreshGeneration = 0
+
     init {
         refresh()
         loadStatus()
@@ -66,6 +69,9 @@ class ChannelsViewModel(private val repo: YtRepository) : ViewModel() {
      */
     fun refresh() {
         val filter = _state.value.filter
+        // Every mutator calls refresh(), so responses can arrive out of order. Only the
+        // newest one may write, or a slow All-load could overwrite the Manual list.
+        val generation = ++refreshGeneration
         viewModelScope.launch {
             _state.value = _state.value.copy(loading = true)
             val mode = filter.modeParam
@@ -77,10 +83,14 @@ class ChannelsViewModel(private val repo: YtRepository) : ViewModel() {
                     list.filter { it.mode == mode }
                 }
             }
+            if (generation != refreshGeneration) return@launch
             loaded
                 .onSuccess { list ->
                     _state.value = _state.value.copy(
-                        channels = if (filter == ChannelFilter.SCHEDULED) list.filter { it.isScheduled } else list,
+                        channels = list.let { if (filter == ChannelFilter.SCHEDULED) it.filter { c -> c.isScheduled } else it }
+                            // Duplicate keys make LazyColumn throw; a duplicate row is never
+                            // something the user needs to see twice.
+                            .distinctBy { it.channelId },
                         loading = false,
                         error = null,
                     )
@@ -124,7 +134,9 @@ class ChannelsViewModel(private val repo: YtRepository) : ViewModel() {
         viewModelScope.launch {
             repo.patchChannel(channel.channelId, ChannelPatch(qualityOverride = override))
                 .onSuccess { _state.value = _state.value.copy(message = "Updated ${channel.displayTitle}"); refresh() }
-                .onFailure { _state.value = _state.value.copy(error = it) }
+                // Re-read on failure too: the card shows local state, and without this a
+                // rejected override would sit on screen looking like it was saved.
+                .onFailure { _state.value = _state.value.copy(error = it); refresh() }
         }
     }
 
@@ -224,18 +236,21 @@ class ChannelsViewModel(private val repo: YtRepository) : ViewModel() {
     /** Takeout is the default because it needs nothing configured on the server. */
     fun importSubscriptions(source: String, data: String?) {
         viewModelScope.launch {
-            _state.value = _state.value.copy(importing = true, error = null)
+            _state.value = _state.value.copy(importing = true, error = null, importResult = null)
             repo.importSubscriptions(source, data?.takeIf { it.isNotBlank() })
                 .onSuccess { result ->
-                    _state.value = _state.value.copy(importing = false, importResult = result)
+                    _state.value = _state.value.copy(
+                        importing = false,
+                        importResult = result,
+                        // Also a snackbar: the sheet can be dismissed while this runs.
+                        message = "Imported ${result.imported} channel${if (result.imported == 1) "" else "s"} from ${result.source}",
+                    )
                     refresh()
                     loadStatus()
                 }
                 .onFailure { _state.value = _state.value.copy(importing = false, error = it) }
         }
     }
-
-    fun clearImportResult() { _state.value = _state.value.copy(importResult = null) }
 
     // ---------- MULTI-SELECT ----------
 
@@ -254,6 +269,10 @@ class ChannelsViewModel(private val repo: YtRepository) : ViewModel() {
     /**
      * Bulk mode / schedule for the selection. Sends the "UC…" identifiers, the same
      * form the per-channel path takes.
+     *
+     * The ids come from the selection itself, not from the loaded list: under a filter
+     * the loaded list is a subset, and intersecting would silently skip selected
+     * channels that happen to be filtered out.
      */
     fun bulkPolicy(
         mode: String? = null,
@@ -261,17 +280,20 @@ class ChannelsViewModel(private val repo: YtRepository) : ViewModel() {
         scheduleDays: List<String>? = null,
         scheduleTime: String? = null,
     ) {
-        val ids = _state.value.channels.map { it.channelId }.filter { it in _state.value.selection }
+        val ids = _state.value.selection.toList()
         if (ids.isEmpty()) return
         viewModelScope.launch {
             repo.setChannelPolicyBulk(
                 PolicyBody.bulk(ids, mode = mode, scheduleEnabled = scheduleEnabled, scheduleDays = scheduleDays, scheduleTime = scheduleTime),
             )
                 .onSuccess {
+                    val n = it.updated
+                    val plural = "channel${if (n == 1) "" else "s"}"
                     val what = when {
-                        mode != null -> "${it.updated} channel${if (it.updated == 1) "" else "s"} set to ${if (mode == "manual") "manual" else "automatic"}"
-                        scheduleEnabled == true -> "Schedule set on ${it.updated} channel${if (it.updated == 1) "" else "s"}"
-                        else -> "Schedule cleared on ${it.updated} channel${if (it.updated == 1) "" else "s"}"
+                        mode != null -> "$n $plural set to ${if (mode == "manual") "manual" else "automatic"}"
+                        scheduleEnabled == true -> "Schedule set on $n $plural"
+                        scheduleEnabled == false -> "Schedule turned off on $n $plural"
+                        else -> "Updated $n $plural"
                     }
                     _state.value = _state.value.copy(message = what, selection = emptySet(), multiSelect = false)
                     refresh()

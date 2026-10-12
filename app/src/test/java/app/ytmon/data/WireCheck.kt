@@ -161,6 +161,36 @@ class WireCheck {
     }
 
     @Test
+    fun takeoutProblemToleratesAByteOrderMark() {
+        assertNull(Wire.takeoutProblem("\uFEFF[{\"channelId\":\"UC1\"}]"))
+        assertNull(Wire.takeoutProblem("  \uFEFF{\"subscriptions\":[{\"channelId\":\"UC1\"}]}  "))
+    }
+
+    @Test
+    fun snapshotKeepsTheChannelsItCanRead() {
+        val snap = Wire.snapshot(
+            """{"source":"takeout","imported":2,"total":3,"created_at":"2026-10-12T09:00:00Z",
+               "channels":[{"channel_id":"UCa"},{"broken":true},{"channel_id":"UCb"}]}""",
+        )
+        assertEquals("takeout", snap.source)
+        assertEquals(2, snap.imported)
+        assertEquals(listOf("UCa", "UCb"), snap.channels.map { it.channelId })
+    }
+
+    @Test
+    fun unreadableServerReplyIsNotReportedAsTheServerBeingAsleep() {
+        val decode = ApiException.fromTransport(
+            kotlinx.serialization.SerializationException("Unexpected JSON token at offset 12"),
+        )
+        assertEquals("bad_response", decode.code)
+        assertTrue(decode.message.contains("answered"))
+
+        val dead = ApiException.fromTransport(java.net.ConnectException("refused"))
+        assertEquals("unreachable", dead.code)
+        assertTrue(dead.message.contains("Termux"))
+    }
+
+    @Test
     fun errorEnvelopeForNewCodesIsParsed() {
         val e = ErrorParser.parse(400, """{"error":{"code":"invalid_takeout","message":"bad json","details":null}}""")
         assertEquals("invalid_takeout", e.code)

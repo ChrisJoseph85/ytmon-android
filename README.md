@@ -104,7 +104,7 @@ schedule (days of week + `HH:MM` local).
 **Import YouTube subscriptions** takes a Google Takeout `subscriptions.json`
 (paste, clipboard or file picker) or the server's own feed. Takeout is the
 default because it needs nothing configured on the server; the feed option is
-only offered when `GET /subscriptions/status` reports cookies, otherwise the
+only *enabled* when `GET /subscriptions/status` reports cookies, otherwise the
 screen says the server needs `YTMON_COOKIES_FILE` instead of showing a raw
 `import_failed`. Imported channels deliberately arrive in **manual** mode, so
 importing 300 subscriptions does not start 300 downloads.
