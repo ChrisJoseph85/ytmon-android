@@ -1,0 +1,30 @@
+# Gradle
+.gradle/
+build/
+*/build/
+local.properties
+
+# Android
+*.apk
+*.aab
+*.ap_
+*.dex
+captures/
+.externalNativeBuild/
+.cxx/
+release/
+
+# IDE
+.idea/
+*.iml
+*.ipr
+*.iws
+.DS_Store
+
+# Keystore / signing — never commit these
+*.keystore
+*.jks
+keystore.properties
+
+# OS
+Thumbs.db
