@@ -75,7 +75,14 @@ class SettingsViewModel(private val repo: YtRepository) : ViewModel() {
         viewModelScope.launch {
             _state.value = _state.value.copy(scanning = true)
             repo.monitorScan()
-                .onSuccess { _state.value = _state.value.copy(scanning = false, message = "Scan finished") }
+                // held = discovered but not downloaded because the channel was not due.
+                // That is a normal outcome, so it is reported as information, not an error.
+                .onSuccess {
+                    _state.value = _state.value.copy(
+                        scanning = false,
+                        message = it.heldSummary?.let { h -> "Scan finished · $h" } ?: "Scan finished",
+                    )
+                }
                 .onFailure { _state.value = _state.value.copy(scanning = false, error = it) }
         }
     }

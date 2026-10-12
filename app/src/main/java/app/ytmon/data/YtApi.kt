@@ -1,6 +1,7 @@
 package app.ytmon.data
 
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonObject
 import okhttp3.MultipartBody
 import okhttp3.RequestBody
 import okhttp3.ResponseBody
@@ -102,7 +103,32 @@ interface YtApi {
     suspend fun deleteChannel(@Path("channelId") channelId: String): Response<Unit>
 
     @POST("channels/{channelId}/scan")
-    suspend fun scanChannel(@Path("channelId") channelId: String): Response<Unit>
+    suspend fun scanChannel(@Path("channelId") channelId: String): Response<ResponseBody>
+
+    /** MERGE — only the keys present in [body] change. See [PolicyBody]. */
+    @PATCH("channels/{channelId}/policy")
+    suspend fun patchChannelPolicy(
+        @Path("channelId") channelId: String,
+        @Body body: JsonObject,
+    ): Response<Channel>
+
+    /** Same merge semantics, many channels at once. */
+    @POST("channels/policy/bulk")
+    suspend fun bulkChannelPolicy(@Body body: JsonObject): Response<BulkPolicyResult>
+
+    /** Takeout import: body carries the pasted subscriptions.json as a STRING. */
+    @POST("subscriptions/import")
+    suspend fun importSubscriptions(@Body body: SubscriptionImportRequest): Response<SubscriptionImportResult>
+
+    /** Body is read leniently (see Wire.channels) rather than pinned to an array. */
+    @GET("subscriptions")
+    suspend fun subscriptions(@Query("mode") mode: String? = null): Response<ResponseBody>
+
+    @GET("subscriptions/status")
+    suspend fun subscriptionsStatus(): Response<ResponseBody>
+
+    @GET("subscriptions/snapshots/{id}")
+    suspend fun subscriptionSnapshot(@Path("id") id: String): Response<ResponseBody>
 
     @GET("channels/export/{fmt}")
     suspend fun exportChannels(@Path("fmt") fmt: String): Response<ResponseBody>
@@ -124,8 +150,9 @@ interface YtApi {
     @PUT("monitor")
     suspend fun putMonitor(@Body body: MonitorSettings): Response<MonitorSettings>
 
+    /** Raw body: the response gained `held`, and the rest of the shape is not pinned. */
     @POST("monitor/scan")
-    suspend fun monitorScan(): Response<Unit>
+    suspend fun monitorScan(): Response<ResponseBody>
 
     // ---------- SOURCES ----------
 

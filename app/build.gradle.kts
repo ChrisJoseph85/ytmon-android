@@ -73,5 +73,7 @@ dependencies {
 
     implementation("io.coil-kt:coil-compose:2.7.0")
 
+    testImplementation("junit:junit:4.13.2")
+
     implementation("androidx.work:work-runtime-ktx:2.10.0")
 }

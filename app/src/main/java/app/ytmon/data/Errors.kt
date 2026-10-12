@@ -4,6 +4,7 @@ import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
+import okhttp3.ResponseBody
 
 /**
  * The server's ONE error shape. Always read `error.code` / `error.message`.
@@ -28,6 +29,14 @@ class ApiException(
             "not_cancellable" -> "That job has already started, so it can no longer be cancelled."
             "invalid_sub_langs" -> "The subtitle language filter is not a valid regular expression."
             "payload_too_large" -> "That import is too large (max 5 MB)."
+            "data_required" -> "Nothing was pasted. Takeout needs the contents of subscriptions.json."
+            "invalid_takeout" ->
+                "That is not a subscriptions export. Paste the whole file — either a " +
+                    "subscriptions array, or the {\"subscriptions\": …} object from Takeout."
+            "import_failed" ->
+                "The server could not read your YouTube subscriptions. Its cookies have " +
+                    "usually expired — set YTMON_COOKIES_FILE again, or use Takeout, which " +
+                    "needs nothing configured."
             "unauthorized", "invalid_token" ->
                 "The server rejected the request. If the address is not this phone's own " +
                     "loopback, add a bearer token in Settings."
@@ -99,5 +108,26 @@ object ApiResult {
     fun unit(response: retrofit2.Response<*>, body: String? = null): Result<Unit> {
         if (response.isSuccessful) return Result.success(Unit)
         return Result.failure(ErrorParser.parse(response.code(), body ?: response.errorBody()?.string()))
+    }
+
+    /**
+     * For endpoints whose payload shape is not pinned down (scan counts,
+     * subscriptions, import status).
+     *
+     * Errors are still surfaced verbatim, but a 2xx body we cannot make sense of
+     * yields [fallback] instead of a failure — a body the app does not recognise
+     * must never break a screen that worked before.
+     */
+    fun <T> lenient(
+        response: retrofit2.Response<ResponseBody>,
+        fallback: T,
+        parse: (String) -> T,
+    ): Result<T> {
+        if (!response.isSuccessful) {
+            return Result.failure(ErrorParser.parse(response.code(), response.errorBody()?.string()))
+        }
+        val raw = runCatching { response.body()?.string() }.getOrNull()
+        if (raw.isNullOrBlank()) return Result.success(fallback)
+        return Result.success(runCatching { parse(raw) }.getOrDefault(fallback))
     }
 }

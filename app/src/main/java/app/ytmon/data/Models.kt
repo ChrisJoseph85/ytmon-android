@@ -2,6 +2,14 @@ package app.ytmon.data
 
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonNull
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.put
 
 /**
  * Models mirror the LIVE server responses verified against v1.0.0.
@@ -193,12 +201,30 @@ data class Channel(
     val title: String? = null,
     val enabled: Boolean = true,
     @SerialName("quality_override") val qualityOverride: QualityOverride? = null,
+    /**
+     * "auto" downloads uploads as they are discovered; "manual" only lists them
+     * (they land in the library as status "discovered" until the user fetches one).
+     * Discovery never stops either way — the mode gates the DOWNLOAD, not the listing.
+     */
+    val mode: String = "auto",
+    /** Schedule: gate downloads to a day-of-week + time window. */
+    @SerialName("schedule_enabled") val scheduleEnabled: Boolean = false,
+    /** Empty means EVERY day. Values are "mon".."sun". */
+    @SerialName("schedule_days") val scheduleDays: List<String> = emptyList(),
+    /** "HH:MM", 24h local, or null when no time has been set. */
+    @SerialName("schedule_time") val scheduleTime: String? = null,
+    /** Server-computed. Read these two; never derive them on the device. */
+    @SerialName("due_now") val dueNow: Boolean = false,
+    @SerialName("next_due") val nextDue: String? = null,
     @SerialName("last_checked_at") val lastCheckedAt: String? = null,
     @SerialName("last_uploaded_at") val lastUploadedAt: String? = null,
     @SerialName("created_at") val createdAt: String? = null,
     @SerialName("updated_at") val updatedAt: String? = null,
 ) {
     val displayTitle: String get() = title?.takeIf { it.isNotBlank() } ?: channelId
+    val isManual: Boolean get() = mode == "manual"
+    val isAuto: Boolean get() = !isManual
+    val isScheduled: Boolean get() = scheduleEnabled
 }
 
 @Serializable
@@ -222,6 +248,121 @@ data class ChannelPatch(
     @SerialName("quality_override") val qualityOverride: QualityOverride? = null,
     val url: String? = null,
 )
+
+/** The seven day codes the server accepts, Monday first. An empty list means every day. */
+val SCHEDULE_DAYS = listOf("mon", "tue", "wed", "thu", "fri", "sat", "sun")
+
+/**
+ * Body for `PATCH /channels/{id}/policy` and `POST /channels/policy/bulk`.
+ *
+ * Hand-built rather than a @Serializable class on purpose. The server MERGES:
+ * a key we do not send must stay out of the request, and the app-wide Json runs
+ * with explicitNulls = false, which would silently drop the `"schedule_time": null`
+ * that is the only way to CLEAR a stored time.
+ *
+ * [bulk] takes the same "UC..." / "@handle" identifiers the single-channel path
+ * uses — never the numeric id.
+ */
+object PolicyBody {
+    fun one(
+        mode: String? = null,
+        scheduleEnabled: Boolean? = null,
+        scheduleDays: List<String>? = null,
+        scheduleTime: String? = null,
+        clearScheduleTime: Boolean = false,
+    ): JsonObject = buildJsonObject {
+        mode?.let { put("mode", it) }
+        scheduleEnabled?.let { put("schedule_enabled", it) }
+        scheduleDays?.let { put("schedule_days", JsonArray(it.map(::JsonPrimitive))) }
+        if (clearScheduleTime) put("schedule_time", JsonNull) else scheduleTime?.let { put("schedule_time", it) }
+    }
+
+    fun bulk(
+        channelIds: List<String>,
+        mode: String? = null,
+        scheduleEnabled: Boolean? = null,
+        scheduleDays: List<String>? = null,
+        scheduleTime: String? = null,
+    ): JsonObject = buildJsonObject {
+        put("channel_ids", JsonArray(channelIds.map(::JsonPrimitive)))
+        one(mode, scheduleEnabled, scheduleDays, scheduleTime).forEach { (k, v) -> put(k, v) }
+    }
+}
+
+// ---------- SUBSCRIPTIONS / SCHEDULES ----------
+
+/** `data` is omitted entirely for source="feed", which reads the server's own cookies. */
+@Serializable
+data class SubscriptionImportRequest(
+    val source: String,
+    val data: String? = null,
+)
+
+@Serializable
+data class SubscriptionImportResult(
+    val source: String = "takeout",
+    val imported: Int = 0,
+    val updated: Int = 0,
+    val skipped: Int = 0,
+    val total: Int = 0,
+    /** Entries may be strings or objects, so they are kept raw and rendered on demand. */
+    val errors: List<JsonElement> = emptyList(),
+) {
+    val errorMessages: List<String> get() = errors.map { e ->
+        (e as? JsonPrimitive)?.contentOrNull ?: e.toString().take(300)
+    }
+}
+
+/**
+ * GET /subscriptions/status. `cookies_configured` decides whether the feed import
+ * can work at all — the server needs YTMON_COOKIES_FILE for it, Takeout needs nothing.
+ */
+@Serializable
+data class SubscriptionsStatus(
+    @SerialName("cookies_configured") val cookiesConfigured: Boolean = false,
+    val total: Int = 0,
+    @SerialName("last_import_source") val lastImportSource: String? = null,
+    @SerialName("last_import_at") val lastImportAt: String? = null,
+)
+
+/** A stored import. The server keeps the payload, so the list survives cookies expiring. */
+@Serializable
+data class SubscriptionSnapshot(
+    val source: String? = null,
+    val imported: Int = 0,
+    val updated: Int = 0,
+    val skipped: Int = 0,
+    val total: Int = 0,
+    @SerialName("created_at") val createdAt: String? = null,
+    val channels: List<Channel> = emptyList(),
+)
+
+@Serializable
+data class BulkPolicyResult(val updated: Int = 0)
+
+/**
+ * POST /monitor/scan and /channels/{id}/scan gained `held`: videos that were
+ * discovered but NOT downloaded because the channel was not due yet.
+ *
+ * Held is a normal outcome — the upload is in the library, waiting. Never show it
+ * as an error, and never tell the user discovery failed.
+ */
+@Serializable
+data class ScanOutcome(
+    val scanned: Int = 0,
+    val discovered: Int = 0,
+    val queued: Int = 0,
+    val downloaded: Int = 0,
+    val held: Int = 0,
+    val failed: Int = 0,
+) {
+    val heldSummary: String?
+        get() = when {
+            held <= 0 -> null
+            held == 1 -> "1 upload found but held until its schedule is due"
+            else -> "$held uploads found but held until their schedule is due"
+        }
+}
 
 @Serializable
 data class Source(

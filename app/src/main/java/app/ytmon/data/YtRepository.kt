@@ -2,6 +2,7 @@ package app.ytmon.data
 
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import kotlinx.serialization.json.JsonObject
 import okhttp3.ResponseBody
 
 /**
@@ -86,14 +87,44 @@ class YtRepository {
     suspend fun deleteChannel(channelId: String): Result<Unit> =
         io { ApiResult.unit(api.deleteChannel(channelId)) }
 
-    suspend fun scanChannel(channelId: String): Result<Unit> =
-        io { ApiResult.unit(apiSlow.scanChannel(channelId)) }
+    suspend fun scanChannel(channelId: String): Result<ScanOutcome> = io {
+        ApiResult.lenient(apiSlow.scanChannel(channelId), ScanOutcome()) { Wire.scanOutcome(it) }
+    }
 
     suspend fun exportChannels(fmt: String): Result<ResponseBody> =
         io { ApiResult.get(api.exportChannels(if (fmt == "csv") "csv" else "json")) }
 
     suspend fun importChannels(fmt: String, body: String): Result<Unit> =
         io { ApiResult.unit(api.importChannels(if (fmt == "csv") "csv" else "json", Network.textBody(body))) }
+
+    // ---------- CHANNEL POLICY (auto/manual + schedule) ----------
+
+    /** Body is built by [PolicyBody.one]; the server merges, so unset keys are omitted. */
+    suspend fun setChannelPolicy(channelId: String, body: JsonObject): Result<Channel> =
+        io { ApiResult.get(api.patchChannelPolicy(channelId, body)) }
+
+    suspend fun setChannelPolicyBulk(body: JsonObject): Result<BulkPolicyResult> =
+        io { ApiResult.get(api.bulkChannelPolicy(body)) }
+
+    // ---------- SUBSCRIPTIONS ----------
+
+    /** mode = "auto" | "manual" filters server-side; null returns everything. */
+    suspend fun subscriptions(mode: String? = null): Result<List<Channel>> = io {
+        ApiResult.lenient(api.subscriptions(mode), emptyList()) { Wire.channels(it) }
+    }
+
+    suspend fun subscriptionsStatus(): Result<SubscriptionsStatus> = io {
+        ApiResult.lenient(api.subscriptionsStatus(), SubscriptionsStatus()) { Wire.subscriptionsStatus(it) }
+    }
+
+    /** Re-reads a stored import, which is why the list survives cookies expiring. */
+    suspend fun subscriptionSnapshot(id: String): Result<SubscriptionSnapshot> = io {
+        ApiResult.lenient(api.subscriptionSnapshot(id), SubscriptionSnapshot()) { Wire.snapshot(it) }
+    }
+
+    /** data is the pasted subscriptions.json; it is null (omitted) for source="feed". */
+    suspend fun importSubscriptions(source: String, data: String?): Result<SubscriptionImportResult> =
+        io { ApiResult.get(api.importSubscriptions(SubscriptionImportRequest(source, data))) }
 
     suspend fun monitorCheck(url: String): Result<Map<String, String?>> =
         io { ApiResult.get(apiSlow.monitorCheck(MonitorCheckRequest(url))) }
@@ -104,7 +135,9 @@ class YtRepository {
     suspend fun putMonitor(body: MonitorSettings): Result<MonitorSettings> =
         io { ApiResult.get(api.putMonitor(body)) }
 
-    suspend fun monitorScan(): Result<Unit> = io { ApiResult.unit(apiSlow.monitorScan()) }
+    suspend fun monitorScan(): Result<ScanOutcome> = io {
+        ApiResult.lenient(apiSlow.monitorScan(), ScanOutcome()) { Wire.scanOutcome(it) }
+    }
 
     // ---------- SOURCES ----------
 
